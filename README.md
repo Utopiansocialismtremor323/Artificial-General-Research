@@ -139,32 +139,99 @@ In our case study, the supervisor audit revealed that 4 discarded experiments al
 
 ---
 
-## Real Results
+## Case Study: Spatialize Library Optimization
 
-Tested on a C++/Python spatial analysis library ([spatialize](https://github.com/alges/spatialize)):
+Full case study on a real C++/Python spatial analysis library ([spatialize](https://github.com/alges/spatialize)) — 18 autonomous experiments over one session.
+
+### Final Numbers
 
 ```
-Baseline:    53.54s
-After AGR:   28.73s  (-46.3%)
+Baseline:       53.54s
+After AGR:       1.15s
+Speedup:          45x
+Improvement:   -97.8%
+Correctness:   ALL 5 BENCHMARKS PASS (MD5 checksums identical to baseline)
 
-14 experiments, 7 kept, 7 discarded, 0 crashes
+18 experiments total:
+   9 kept      (50%)
+   9 discarded (50%)
+   0 crashes
+
+11 source files modified
+410 lines inserted, 179 deleted (~589 lines total diff)
 ```
+
+### Timeline
 
 ![AGR Optimization Timeline](progress.png)
 
-*Top: total benchmark time per experiment (green = kept, gray = discarded, dashed = best so far). Bottom: per-benchmark breakdown showing where improvements came from.*
+*Green circles = real improvements. Orange diamonds = phantom improvements (header changes that weren't compiled due to a build system bug the agent discovered). Red arrow = the moment the agent discovered the bug and activated all accumulated optimizations.*
 
-Optimizations found autonomously:
-| # | Optimization | Improvement | Type |
+### Every Optimization Found (in order)
+
+| # | What AGR Did | Files Changed | Speedup | Type | Correctness |
+|---|---|---|---|---|---|
+| 1 | `std::pow(x,2)` → `x*x` and `std::pow(c,0.5)` → `sqrtf(c)` in distance() | `utils.hpp` | 18x on distance() | C++ micro | PASS |
+| 2 | Pre-computed coordinate diffs in LOO2D/LOO3D constructor, reused storage across eval() calls | `adaptive_esi_idw.hpp` | Eliminated per-eval heap allocation | C++ memory | PASS |
+| 3 | `std::pow(dist_sq, half_exp)` → `exp2f(half_exp * log2f(dist_sq))` | `adaptive_esi_idw.hpp` | ~10% in LOO inner loop | C++ math | PASS |
+| 4 | Vectorized KDE fitting — replaced per-point sklearn KDE with batch NumPy: vectorized Silverman bandwidth, batch random index selection + kernel noise. Eliminated all sklearn and joblib overhead. | `ess/_main.py` | **53x** on ESS pipeline | Python algorithmic | PASS |
+| 5 | Grid search evaluation cache — `unordered_map` keyed on integer grid indices, shared across `best_of` random restarts | `utils.hpp` | ~5% on adaptive ESI | C++ caching | PASS |
+| 6 | Parallelized `estimate()` tree loop with OpenMP + passed `search_leaf` by const reference to eliminate vector copies | `abstract_esi.hpp`, `libspatialize.cpp` | **18x** uniform across all benchmarks | C++ parallelism | PASS |
+| 7 | Discovered setuptools build bug: `.hpp` header changes weren't triggering recompilation. `rm -rf build/` activated ALL previous header optimizations at once. Also fixed GIL crash — `PyErr_CheckSignals()` was called inside OMP parallel region without holding the GIL. | `libspatialize.cpp`, build system | 28.73s → 1.21s in one step | Bug discovery | PASS |
+| 8 | Flattened `post_process` from tree-level to leaf-level OMP parallelism with size-descending sort for better load balancing. Pre-generated random numbers outside parallel region for determinism. | `adaptive_esi_idw.hpp` | 14% on adaptive ESI | C++ parallelism | PASS |
+
+### Per-Benchmark Results
+
+| Benchmark | Baseline | After AGR | Speedup | What It Tests |
+|---|---|---|---|---|
+| Adaptive ESI 2D | 33.39s | 0.42s | **80x** | Grid search + LOO cross-validation per partition leaf |
+| ESI + ESS Pipeline | 14.59s | 0.27s | **53x** | Full estimation → KDE fitting → stochastic simulation |
+| ESI IDW 2D | 3.34s | 0.18s | **18x** | Core Mondrian partitioning + IDW interpolation |
+| ESI IDW 3D | 1.80s | 0.10s | **18x** | Higher-dimensional spatial estimation |
+| Hparam Search | 0.42s | 0.15s | **3x** | K-fold cross-validation over parameter grid |
+
+### What The Agent ALSO Tried (Discarded — But Valuable Data)
+
+These experiments didn't improve performance but taught the agent what NOT to try:
+
+| # | What Was Tried | Why It Failed | Category Exhausted? |
 |---|---|---|---|
-| 1 | `std::pow(x,2)` → `x*x` in distance() | -16.4% | Micro-optimization |
-| 2 | Pre-computed coordinate diffs + reused storage | -12.7% | Memory layout |
-| 3 | `std::pow` → `exp2f(log2f())` in LOO inner loop | -2.2% | Math intrinsics |
-| 4 | Vectorized KDE fitting, bypassed sklearn+joblib | -14.4% | Algorithmic (Python) |
-| 5 | Cached grid_search evaluations across restarts | -2.5% | Caching |
-| 6 | Parallelized estimate() tree loop + const ref | -9.8% | Parallelism |
+| 1 | Fuse LOO2D two-pass into single-pass | Two-pass vectorizes better on MSVC; dist_pow matrix fits in L1 cache | Yes: loop fusion |
+| 2 | MSVC `/fp:fast` compiler flag | Net negative: fast-math interfered with existing optimizations | Yes: compiler flags |
+| 3 | Branchless LOO IDW loop (sentinel diagonal) | Branch is well-predicted by CPU; exp2f/log2f dominates, not the IDW accumulation | Yes: LOO micro-opts |
+| 4 | MSVC `/arch:AVX2` flag | AVX frequency throttling; scalar CRT functions can't auto-vectorize | Yes: compiler flags |
+| 5 | Leaf-level parallelism in post_process (first attempt) | System was under load (all benchmarks uniformly 20% slower) — measurement artifact | No: retried later successfully |
+| 6 | Remove inner OpenMP from LOO2D/LOO3D::eval() | OMP overhead for nested regions is negligible | Yes: nested OMP |
+| 7 | Optimize grid_search hot loop (const ref, pre-alloc) | Grid search converges in ~5-10 steps for small leaves — overhead is minimal | Yes: grid_search micro-opts |
+| 8 | Parallelize k_fold/LOO tree loops with OMP | OMP overhead exceeds work for small items | Yes: small-work OMP |
+| 9 | Retry remove inner OMP (clean build) | Confirmed: no improvement even with clean build | Confirmed |
 
-The agent naturally progressed from easy micro-optimizations to algorithmic changes. When micro-opts plateaued (5 consecutive discards), the strategy document guided it toward architectural improvements.
+### What AGR Demonstrated In Practice
+
+**1. The agent naturally escalates complexity.** It started with easy wins (`pow→x*x`), moved to memory optimizations (pre-compute diffs), then algorithmic changes (vectorize KDE), then parallelism (OMP tree loops), and finally architectural changes (flatten post_process to leaf-level OMP). No human guided this progression — the STRATEGY.md bottleneck analysis drove it.
+
+**2. Exhausted Approaches prevent wasted iterations.** After 4 failed compiler flag experiments, the agent marked "compiler flags" as exhausted and stopped trying them. Same for "LOO micro-optimizations" after 3 failures. Without this, the agent would keep retrying variations of the same failed category.
+
+**3. The agent found a build system bug no human noticed.** Setuptools with pybind11 doesn't track `.hpp` header dependencies — only `.cpp` source file changes trigger recompilation. The agent discovered this by running `rm -rf build/` as part of a clean rebuild, which activated ALL accumulated header optimizations at once (28.73s → 1.21s). This is arguably the most valuable finding of the entire campaign.
+
+**4. The GIL crash fix was a critical safety improvement.** The agent found that `PyErr_CheckSignals()` (needed for Ctrl+C handling) was being called inside an OpenMP parallel region without holding the GIL, causing random segfaults. This bug existed in the original code and would have affected all users.
+
+**5. Measurement variance is real and dangerous.** 4 experiments were incorrectly discarded because `adaptive_esi` (82% of total time) had ±1s variance that masked real 120ms improvements in `esi_idw_3d`. The supervisor audit caught this. Also, one kept baseline measurement (1.56s) was an outlier — the true value was ~1.44s. Every subsequent experiment that "improved" this benchmark was actually just returning to the real value.
+
+**6. "Phantom improvements" from stale builds.** Because headers weren't being recompiled, the agent measured "improvements" of -16.4%, -12.7%, -2.2% that were actually measurement noise. The real improvements from those header changes only materialized after the clean rebuild. This is a cautionary tale for any autoresearch system working with compiled languages.
+
+**7. Simplicity wins.** Several kept experiments not only made the code faster but also simpler — fewer allocations, const references instead of copies, removed dead OpenMP nesting. The simplicity criterion prevented complexity accumulation.
+
+### Dimension of Changes for Code Review
+
+The total code review for all optimizations is **~589 lines of diff across 11 files**. The core changes are concentrated in 3 C++ headers and 1 Python file. An experienced C++ reviewer can audit this in 2-3 hours.
+
+```
+include/spatialize/adaptive_esi_idw.hpp  — LOO2D/LOO3D pre-compute, flatten OMP
+include/spatialize/abstract_esi.hpp      — Parallelize estimate(), const ref
+include/spatialize/utils.hpp             — distance() sqrt, grid_search cache
+src/python/spatialize/gs/ess/_main.py    — Vectorized KDE (bypass sklearn)
+```
 
 ---
 
