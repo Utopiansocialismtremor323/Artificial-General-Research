@@ -44,7 +44,7 @@ AGR separates **Metric** (what you optimize) from **Guard** (what must not break
 
 ## Real Results
 
-Tested on a C++/Python spatial analysis library:
+Tested on a C++/Python spatial analysis library ([spatialize](https://github.com/alges/spatialize)):
 
 ```
 Baseline:    53.54s
@@ -52,6 +52,10 @@ After AGR:   28.73s  (-46.3%)
 
 14 experiments, 7 kept, 7 discarded, 0 crashes
 ```
+
+![AGR Optimization Timeline](progress.png)
+
+*Top: total benchmark time per experiment (green = kept, gray = discarded). Bottom: per-benchmark breakdown showing where improvements came from.*
 
 Optimizations found autonomously:
 | Optimization | Improvement | Type |
