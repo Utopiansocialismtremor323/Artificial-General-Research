@@ -94,7 +94,7 @@ Correctness:   ALL 5 BENCHMARKS PASS (MD5 checksums identical to baseline)
 
 ![AGR Optimization Timeline](progress.png)
 
-*Green circles = real improvements. Orange diamonds = phantom improvements (header changes that weren't compiled due to a build system bug the agent discovered). Red arrow = the moment the agent discovered the bug and activated all accumulated optimizations.*
+*Filled circles = kept experiments. Open diamonds = phantom improvements (.hpp header changes not compiled by build system). Open circles = discarded experiments. Red star/arrow = the moment the agent discovered the setuptools bug and activated all accumulated header optimizations at once.*
 
 ### Every Optimization Found (in order)
 
